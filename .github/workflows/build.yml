@@ -6,8 +6,9 @@ on:
         filebin_code:
             required: true
             type: string
-            #default: "0uv3y9tjqm0hjb51" 
-            
+            description: 'Filebin bin code (e.g. 0uv3y9tjqm0hjb51) or full Filebin URL (e.g. https://filebin.net/0uv3y9tjqm0hjb51)'
+            #default: "0uv3y9tjqm0hjb51"
+
 jobs:
   build:
     runs-on: windows-2022
@@ -16,10 +17,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Importing Files
+        shell: pwsh
         run: |
+           $raw = "${{ inputs.filebin_code }}".Trim()
+           if ($raw -match 'filebin\.net/(?:archive/)?([^/?#]+)') {
+               $binCode = $matches[1]
+           } else {
+               $binCode = $raw
+           }
+           Write-Host "Resolved Filebin bin code: $binCode"
+
            mkdir win
            cd win
-           curl -o filebin.zip https://filebin.net/archive/${{ inputs.filebin_code }}/zip
+           curl.exe -fSL -o filebin.zip "https://filebin.net/archive/$binCode/zip"
            tar -xf filebin.zip
            del filebin.zip
            ren *.zip win.zip
