@@ -65,6 +65,8 @@ jobs:
           [void]$summary.AppendLine('## Build Summary')
           [void]$summary.AppendLine('')
 
+          $failedUploads = New-Object System.Collections.Generic.List[string]
+
           foreach ($iso in $isos) {
               Write-Host "::group::Uploading $($iso.Name)"
               $captured = New-Object System.Collections.Generic.List[string]
@@ -73,11 +75,17 @@ jobs:
                   Write-Host $line
                   $captured.Add($line)
               }
+              $uploadExitCode = $LASTEXITCODE
               Write-Host '::endgroup::'
 
               $output = $captured -join "`n"
               $linkMatch = [regex]::Match($output, 'https://gofile\.io/d/[A-Za-z0-9]+')
               $link = if ($linkMatch.Success) { $linkMatch.Value } else { $null }
+
+              if ($uploadExitCode -ne 0 -or -not $link) {
+                  $failedUploads.Add($iso.Name)
+                  Write-Host "::error::upload.cmd failed for $($iso.Name) (exit=$uploadExitCode, link=$(if ($link) { $link } else { '<none>' }))"
+              }
 
               $name = $iso.BaseName
               $build   = if ($name -match '^(\d+\.\d+)')                                                                                              { $matches[1] } else { '' }
@@ -101,7 +109,7 @@ jobs:
               if ($link) {
                   [void]$summary.AppendLine("| **Download** | [$link]($link) |")
               } else {
-                  [void]$summary.AppendLine('| **Download** | _(upload failed — see logs)_ |')
+                  [void]$summary.AppendLine("| **Download** | _(upload failed, exit=$uploadExitCode — see logs)_ |")
               }
               if ($build)   { [void]$summary.AppendLine("| Build | $build |") }
               if ($version) { [void]$summary.AppendLine("| Version | $version |") }
@@ -114,4 +122,9 @@ jobs:
 
           if ($env:GITHUB_STEP_SUMMARY) {
               $summary.ToString() | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          }
+
+          if ($failedUploads.Count -gt 0) {
+              Write-Error ("Upload failed for: " + ($failedUploads -join ', '))
+              exit 1
           }
