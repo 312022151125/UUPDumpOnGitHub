@@ -6,20 +6,30 @@ on:
         filebin_code:
             required: true
             type: string
-            #default: "0uv3y9tjqm0hjb51" 
-            
+            description: 'Filebin bin code (e.g. 0uv3y9tjqm0hjb51) or full Filebin URL (e.g. https://filebin.net/0uv3y9tjqm0hjb51)'
+            #default: "0uv3y9tjqm0hjb51"
+
 jobs:
   build:
     runs-on: windows-2022
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Importing Files
+        shell: pwsh
         run: |
+           $raw = "${{ inputs.filebin_code }}".Trim()
+           if ($raw -match 'filebin\.net/(?:archive/)?([^/?#]+)') {
+               $binCode = $matches[1]
+           } else {
+               $binCode = $raw
+           }
+           Write-Host "Resolved Filebin bin code: $binCode"
+
            mkdir win
            cd win
-           curl -o filebin.zip https://filebin.net/archive/${{ inputs.filebin_code }}/zip
+           curl.exe -fSL -o filebin.zip "https://filebin.net/archive/$binCode/zip"
            tar -xf filebin.zip
            del filebin.zip
            ren *.zip win.zip
@@ -35,6 +45,86 @@ jobs:
         run: ./start.cmd
 
       - name: Upload File & Get Links
-        shell: cmd
+        shell: pwsh
         run: |
-          FOR %%i IN (*.ISO) DO CALL upload.cmd "%%i"
+          $isos = Get-ChildItem -Filter *.ISO -File
+          if (-not $isos) {
+              Write-Error "No ISO files found to upload."
+              exit 1
+          }
+
+          $archMap = @{
+              'A64'   = 'ARM64'
+              'AMD64' = 'x64'
+              'X64'   = 'x64'
+              'X86'   = 'x86'
+              'ARM64' = 'ARM64'
+          }
+
+          $summary = [System.Text.StringBuilder]::new()
+          [void]$summary.AppendLine('## Build Summary')
+          [void]$summary.AppendLine('')
+
+          $failedUploads = New-Object System.Collections.Generic.List[string]
+
+          foreach ($iso in $isos) {
+              Write-Host "::group::Uploading $($iso.Name)"
+              $captured = New-Object System.Collections.Generic.List[string]
+              & .\upload.cmd $iso.Name 2>&1 | ForEach-Object {
+                  $line = "$_"
+                  Write-Host $line
+                  $captured.Add($line)
+              }
+              $uploadExitCode = $LASTEXITCODE
+              Write-Host '::endgroup::'
+
+              $output = $captured -join "`n"
+              $linkMatch = [regex]::Match($output, 'https://gofile\.io/d/[A-Za-z0-9]+')
+              $link = if ($linkMatch.Success) { $linkMatch.Value } else { $null }
+
+              if ($uploadExitCode -ne 0 -or -not $link) {
+                  $failedUploads.Add($iso.Name)
+                  Write-Host "::error::upload.cmd failed for $($iso.Name) (exit=$uploadExitCode, link=$(if ($link) { $link } else { '<none>' }))"
+              }
+
+              $name = $iso.BaseName
+              $build   = if ($name -match '^(\d+\.\d+)')                                                                                              { $matches[1] } else { '' }
+              $version = if ($name -match '\.(\d+H\d+)_')                                                                                             { $matches[1] } else { '' }
+              $archRaw = if ($name -match '_(A64|AMD64|X64|X86|ARM64)FRE_')                                                                           { $matches[1] } else { '' }
+              $arch    = if ($archRaw -and $archMap.ContainsKey($archRaw))                                                                            { $archMap[$archRaw] } else { $archRaw }
+              $edition = if ($name -match '_(CLIENT[A-Z]*|SERVER[A-Z]*|PROFESSIONAL|HOME[A-Z]*|ENTERPRISE[A-Z]*|EDUCATION[A-Z]*|CORE[A-Z]*)_')      { $matches[1] } else { '' }
+              $lang    = if ($name -match '_([a-z]{2,3}-[a-z]{2,5})$')                                                                                { $matches[1].ToUpper() } else { '' }
+
+              $titleParts = @()
+              if ($version) { $titleParts += $version }
+              if ($arch)    { $titleParts += $arch }
+              if ($edition) { $titleParts += $edition }
+              $suffix = if ($titleParts.Count) { ' (' + ($titleParts -join ' · ') + ')' } else { '' }
+              $heading = if ($build) { "### Build $build$suffix" } else { "### $($iso.Name)" }
+
+              [void]$summary.AppendLine($heading)
+              [void]$summary.AppendLine('')
+              [void]$summary.AppendLine('| Field | Value |')
+              [void]$summary.AppendLine('| --- | --- |')
+              if ($link) {
+                  [void]$summary.AppendLine("| **Download** | [$link]($link) |")
+              } else {
+                  [void]$summary.AppendLine("| **Download** | _(upload failed, exit=$uploadExitCode — see logs)_ |")
+              }
+              if ($build)   { [void]$summary.AppendLine("| Build | $build |") }
+              if ($version) { [void]$summary.AppendLine("| Version | $version |") }
+              if ($arch)    { [void]$summary.AppendLine("| Architecture | $arch |") }
+              if ($edition) { [void]$summary.AppendLine("| Edition | $edition |") }
+              if ($lang)    { [void]$summary.AppendLine("| Language | $lang |") }
+              [void]$summary.AppendLine("| ISO file | ``$($iso.Name)`` |")
+              [void]$summary.AppendLine('')
+          }
+
+          if ($env:GITHUB_STEP_SUMMARY) {
+              $summary.ToString() | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8
+          }
+
+          if ($failedUploads.Count -gt 0) {
+              Write-Error ("Upload failed for: " + ($failedUploads -join ', '))
+              exit 1
+          }
